@@ -1,5 +1,5 @@
 [project]
-name = "torchpuresort"
+name = "torchpsort"
 version = "0.0.1"
 description = "Fast, differentiable sorting in pure PyTorch without C++ or CUDA"
 readme = "README.md"
@@ -11,11 +11,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules"
 ]
 dependencies = [
+    "numpy>=2.5.1",
     "torch>=2.13.0",
 ]
 
 [project.urls]
-repository = "https://github.com/RektPunk/torchpuresort"
+repository = "https://github.com/RektPunk/torchpsort"
 
 [dependency-groups]
 dev = [

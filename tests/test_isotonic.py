@@ -1,7 +1,7 @@
 import torch
 from torch.testing import assert_close
 
-from torchpuresort.isotonic import isotonic_backward, isotonic_forward
+from torchpsort.isotonic import isotonic_backward, isotonic_forward
 
 
 def test_forward_already_sorted():

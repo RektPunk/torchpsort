@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch.autograd import gradcheck
 
-from torchpuresort.ops import soft_rank, soft_sort
+from torchpsort.ops import soft_rank, soft_sort
 
 
 @pytest.fixture(autouse=True)
