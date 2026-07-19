@@ -1,0 +1,33 @@
+[project]
+name = "torchpsort"
+version = "0.0.1"
+description = "Fast, differentiable sorting in pure PyTorch without C++ or CUDA"
+readme = "README.md"
+authors = [
+    {name = "RektPunk", email = "rektpunk@gmail.com"},
+]
+requires-python = ">=3.12,<=3.14"
+classifiers = [
+    "Topic :: Software Development :: Libraries :: Python Modules"
+]
+dependencies = [
+    "numpy>=2.5.1",
+    "torch>=2.13.0",
+]
+
+[project.urls]
+repository = "https://github.com/RektPunk/torchpsort"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore:.*torch.jit.script.*:DeprecationWarning"
+]
