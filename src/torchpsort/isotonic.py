@@ -31,64 +31,112 @@
 #  DAMAGE.
 
 import torch
+from torch import Tensor
 
 
 @torch.jit.script
-def isotonic_forward(x: torch.Tensor) -> torch.Tensor:
+def isotonic_l2_forward(x: Tensor) -> Tensor:
     batch_size, p = x.shape
-    solution = torch.empty_like(x)
-    sums = torch.empty_like(x)
-    target = torch.empty_like(x, dtype=torch.long)
-    counts = torch.empty_like(x)
+    solution = x.clone()
+    block_sums = x.clone()
+    block_counts = torch.ones_like(x)
+    block_end = (
+        torch.arange(p, device=x.device, dtype=torch.long)
+        .expand(batch_size, -1)
+        .clone()
+    )
     for b in range(batch_size):
-        for j in range(p):
-            counts[b, j] = 1.0
-            solution[b, j] = x[b, j]
-            sums[b, j] = x[b, j]
-            target[b, j] = j
-
-        j = 0
-        while j < p:
-            k = target[b, j] + 1
-            if k == p:
+        block = 0
+        while block < p:
+            next_block = block_end[b, block] + 1
+            if next_block == p:
                 break
-            if solution[b, j] > solution[b, k]:
-                j = k
+            if solution[b, block] > solution[b, next_block]:
+                block = next_block
                 continue
 
-            sum_x = sums[b, j]
-            sum_c = counts[b, j]
+            block_sum = block_sums[b, block]
+            block_count = block_counts[b, block]
 
             while True:
-                prev_x = solution[b, k]
-                sum_x += sums[b, k]
-                sum_c += counts[b, k]
-                k = target[b, k] + 1
+                last_value = solution[b, next_block]
+                block_sum += block_sums[b, next_block]
+                block_count += block_counts[b, next_block]
+                next_block = block_end[b, next_block] + 1
 
-                if k == p or prev_x > solution[b, k]:
-                    solution[b, j] = sum_x / sum_c
-                    sums[b, j] = sum_x
-                    counts[b, j] = sum_c
-                    target[b, j] = k - 1
-                    target[b, k - 1] = j
+                if next_block == p or last_value > solution[b, next_block]:
+                    solution[b, block] = block_sum / block_count
+                    block_sums[b, block] = block_sum
+                    block_counts[b, block] = block_count
+                    block_end[b, block] = next_block - 1
+                    block_end[b, next_block - 1] = block
 
-                    if j > 0:
-                        j = target[b, j - 1]
+                    if block > 0:
+                        block = block_end[b, block - 1]
                     break
 
-        j = 0
-        while j < p:
-            k = target[b, j] + 1
-            start_idx = int(j + 1)
-            end_idx = int(k)
-            solution[b, start_idx:end_idx] = solution[b, j]
-            j = k
+        block = 0
+        while block < p:
+            next_block = block_end[b, block] + 1
+            solution[b, (block + 1) : next_block] = solution[b, block]
+            block = next_block
 
     return solution
 
 
 @torch.jit.script
-def isotonic_backward(sol: torch.Tensor, grad_output: torch.Tensor) -> torch.Tensor:
+def isotonic_kl_forward(x: Tensor, w: Tensor) -> Tensor:
+    batch_size, p = x.shape
+    solution = x - w
+    block_lse_x = x.clone()
+    block_lse_w = w.clone()
+    block_end = (
+        torch.arange(p, device=x.device, dtype=torch.long)
+        .expand(batch_size, -1)
+        .clone()
+    )
+
+    for b in range(batch_size):
+        block = 0
+        while block < p:
+            next_block = block_end[b, block] + 1
+            if next_block == p:
+                break
+            if solution[b, block] > solution[b, next_block]:
+                block = next_block
+                continue
+
+            curr_lse_x = block_lse_x[b, block]
+            curr_lse_w = block_lse_w[b, block]
+
+            while True:
+                last_value = solution[b, next_block]
+                curr_lse_x = torch.logaddexp(curr_lse_x, block_lse_x[b, next_block])
+                curr_lse_w = torch.logaddexp(curr_lse_w, block_lse_w[b, next_block])
+                next_block = block_end[b, next_block] + 1
+
+                if next_block == p or last_value > solution[b, next_block]:
+                    solution[b, block] = curr_lse_x - curr_lse_w
+                    block_lse_x[b, block] = curr_lse_x
+                    block_lse_w[b, block] = curr_lse_w
+                    block_end[b, block] = next_block - 1
+                    block_end[b, next_block - 1] = block
+
+                    if block > 0:
+                        block = block_end[b, block - 1]
+                    break
+
+        block = 0
+        while block < p:
+            next_block = block_end[b, block] + 1
+            solution[b, (block + 1) : next_block] = solution[b, block]
+            block = next_block
+
+    return solution
+
+
+@torch.jit.script
+def isotonic_l2_backward(sol: Tensor, grad_output: Tensor) -> Tensor:
     batch_size, p = sol.shape
     grad_input = torch.empty_like(grad_output)
     tol = 1e-6 if sol.dtype == torch.float32 else 1e-12
@@ -99,11 +147,33 @@ def isotonic_backward(sol: torch.Tensor, grad_output: torch.Tensor) -> torch.Ten
             while end < p and torch.abs(sol[b, end] - sol[b, start]) < tol:
                 end += 1
 
-            size = float(end - start)
-            val = 1.0 / size
+            val = 1.0 / float(end - start)
 
             grad_sum = grad_output[b, start:end].sum()
             grad_input[b, start:end] = val * grad_sum
+
+            start = end
+
+    return grad_input
+
+
+@torch.jit.script
+def isotonic_kl_backward(s: Tensor, sol: Tensor, grad_output: Tensor) -> Tensor:
+    batch_size, p = sol.shape
+    grad_input = torch.empty_like(grad_output)
+    tol = 1e-6 if sol.dtype == torch.float32 else 1e-12
+    for b in range(batch_size):
+        start = 0
+        while start < p:
+            end = start + 1
+            while end < p and torch.abs(sol[b, end] - sol[b, start]) < tol:
+                end += 1
+
+            block_s = s[b, start:end]
+            softmax_weights = torch.softmax(block_s, dim=0)
+
+            grad_sum = grad_output[b, start:end].sum()
+            grad_input[b, start:end] = softmax_weights * grad_sum
 
             start = end
 
