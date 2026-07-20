@@ -97,7 +97,7 @@ def _get_global_block_ids(sol: Tensor) -> Tensor:
     batch_size, p = sol.shape
 
     device = sol.device
-    tol = torch.finfo(sol.dtype).eps * 100
+    tol = torch.finfo(sol.dtype).eps * 10
 
     # Detect boundaries between pooled isotonic blocks
     diff = torch.abs(sol[:, 1:] - sol[:, :-1]) >= tol
