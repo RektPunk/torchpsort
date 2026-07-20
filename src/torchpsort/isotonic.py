@@ -34,132 +34,99 @@ import torch
 from torch import Tensor
 
 
-@torch.jit.script
 def isotonic_l2_forward(x: Tensor) -> Tensor:
-    batch_size, p = x.shape
-    solution = x.clone()
-    block_sums = x.clone()
-    block_counts = torch.ones_like(x)
-    block_end = (
-        torch.arange(p, device=x.device, dtype=torch.long)
-        .expand(batch_size, -1)
-        .clone()
-    )
-    for b in range(batch_size):
-        block = 0
-        while block < p:
-            next_block = block_end[b, block] + 1
-            if next_block == p:
-                break
-            if solution[b, block] > solution[b, next_block]:
-                block = next_block
-                continue
+    _, p = x.shape
+    device = x.device
+    dtype = x.dtype
 
-            block_sum = block_sums[b, block]
-            block_count = block_counts[b, block]
+    # Compute interval sums and means for all pairs (j <= k)
+    x_cumsum = torch.cumsum(x, dim=1)
+    sum_jk = x_cumsum[:, None, :] - x_cumsum[:, :, None] + x[:, :, None]
+    count_jk = torch.arange(1, p + 1, device=device, dtype=dtype)
+    count_jk = count_jk[None, :] - count_jk[:, None] + 1.0
+    vals = sum_jk / count_jk[None, :, :]
 
-            while True:
-                last_value = solution[b, next_block]
-                block_sum += block_sums[b, next_block]
-                block_count += block_counts[b, next_block]
-                next_block = block_end[b, next_block] + 1
+    # Mask invalid lower-triangle entries (j > k)
+    mask = torch.triu(torch.ones(p, p, device=device, dtype=torch.bool))[None, :, :]
 
-                if next_block == p or last_value > solution[b, next_block]:
-                    solution[b, block] = block_sum / block_count
-                    block_sums[b, block] = block_sum
-                    block_counts[b, block] = block_count
-                    block_end[b, block] = next_block - 1
-                    block_end[b, next_block - 1] = block
+    # Interval means.
+    # Shape: (batch_size, p, p)
+    vals = torch.where(mask, vals, -float("inf"))
 
-                    if block > 0:
-                        block = block_end[b, block - 1]
-                    break
+    # Suffix maximums: U[b, j, i] = max_{k >= i} vals[b, j, k]
+    U = torch.flip(torch.cummax(torch.flip(vals, dims=[2]), dim=2)[0], dims=[2])
+    U = torch.where(mask, U, float("inf"))
 
-        block = 0
-        while block < p:
-            next_block = block_end[b, block] + 1
-            solution[b, (block + 1) : next_block] = solution[b, block]
-            block = next_block
-
-    return solution
+    # Prefix minimums: sol[b, i] = min_{j <= i} U[b, j, i]
+    return torch.min(U, dim=1)[0]
 
 
-@torch.jit.script
 def isotonic_kl_forward(x: Tensor, w: Tensor) -> Tensor:
-    batch_size, p = x.shape
-    solution = x - w
-    block_lse_x = x.clone()
-    block_lse_w = w.clone()
-    block_end = (
-        torch.arange(p, device=x.device, dtype=torch.long)
-        .expand(batch_size, -1)
-        .clone()
-    )
+    _, p = x.shape
+    device = x.device
+    mask = torch.triu(torch.ones(p, p, device=device, dtype=torch.bool))[None, :, :]
+    eps = torch.finfo(torch.float32).tiny
 
-    for b in range(batch_size):
-        block = 0
-        while block < p:
-            next_block = block_end[b, block] + 1
-            if next_block == p:
-                break
-            if solution[b, block] > solution[b, next_block]:
-                block = next_block
-                continue
+    # Log-sum-exp for x across all intervals (j <= k)
+    diff_x = x[:, None, :] - x[:, :, None]
+    diff_x = torch.where(mask, diff_x, -float("inf"))
+    exp_x = torch.exp(diff_x)
+    sum_exp_x = torch.cumsum(exp_x, dim=2)
+    lse_x = x[:, :, None] + torch.log(torch.clamp(sum_exp_x, min=eps))
 
-            curr_lse_x = block_lse_x[b, block]
-            curr_lse_w = block_lse_w[b, block]
+    # Log-sum-exp for w across all intervals (j <= k)
+    diff_w = w[:, None, :] - w[:, :, None]
+    diff_w = torch.where(mask, diff_w, -float("inf"))
+    exp_w = torch.exp(diff_w)
+    sum_exp_w = torch.cumsum(exp_w, dim=2)
+    lse_w = w[:, :, None] + torch.log(torch.clamp(sum_exp_w, min=eps))
 
-            while True:
-                last_value = solution[b, next_block]
-                curr_lse_x = torch.logaddexp(curr_lse_x, block_lse_x[b, next_block])
-                curr_lse_w = torch.logaddexp(curr_lse_w, block_lse_w[b, next_block])
-                next_block = block_end[b, next_block] + 1
+    # Compute interval objective values
+    # Shape: (batch_size, p, p)
+    vals = torch.where(mask, lse_x - lse_w, -float("inf"))
 
-                if next_block == p or last_value > solution[b, next_block]:
-                    solution[b, block] = curr_lse_x - curr_lse_w
-                    block_lse_x[b, block] = curr_lse_x
-                    block_lse_w[b, block] = curr_lse_w
-                    block_end[b, block] = next_block - 1
-                    block_end[b, next_block - 1] = block
+    # Suffix maximums: U[b, j, i] = max_{k >= i} vals[b, j, k]
+    U = torch.flip(torch.cummax(torch.flip(vals, dims=[2]), dim=2)[0], dims=[2])
+    U = torch.where(mask, U, float("inf"))
 
-                    if block > 0:
-                        block = block_end[b, block - 1]
-                    break
-
-        block = 0
-        while block < p:
-            next_block = block_end[b, block] + 1
-            solution[b, (block + 1) : next_block] = solution[b, block]
-            block = next_block
-
-    return solution
+    # Prefix minimums: sol[b, i] = min_{j <= i} U[b, j, i]
+    return torch.min(U, dim=1)[0]
 
 
-def _get_global_block_ids(sol: Tensor, batch_size: int, p: int) -> Tensor:
+def _get_global_block_ids(sol: Tensor) -> Tensor:
+    batch_size, p = sol.shape
+
+    device = sol.device
+    tol = torch.finfo(sol.dtype).eps * 100
+
     # Detect boundaries between pooled isotonic blocks
-    tol = 1e-6 if sol.dtype == torch.float32 else 1e-12
     diff = torch.abs(sol[:, 1:] - sol[:, :-1]) >= tol
     start_mask = torch.cat(
-        [torch.ones(batch_size, 1, dtype=torch.bool, device=sol.device), diff], dim=1
+        [torch.ones(batch_size, 1, dtype=torch.bool, device=device), diff], dim=1
     )
 
-    # Assign a unique block id to every element
+    # Assign block ids within each batch.
     local_block_ids = torch.cumsum(start_mask.to(torch.long), dim=1) - 1
+
+    # Offset block ids so different batches never collide.
     global_block_ids = (
-        local_block_ids + p * torch.arange(batch_size, device=sol.device).unsqueeze(1)
+        local_block_ids + p * torch.arange(batch_size, device=device).unsqueeze(1)
     ).reshape(-1)
+
     return global_block_ids
 
 
 def isotonic_l2_backward(sol: Tensor, grad_output: Tensor) -> Tensor:
     batch_size, p = sol.shape
+    device = sol.device
+    dtype = sol.dtype
     num_blocks = batch_size * p
-    global_block_ids = _get_global_block_ids(sol, batch_size, p)
+    global_block_ids = _get_global_block_ids(sol)
 
     # Sum gradients and count elements for each pooled block
     flat_grad_output = grad_output.reshape(-1)
-    block_grad_sums = torch.zeros(num_blocks, device=sol.device, dtype=sol.dtype)
-    block_counts = torch.zeros(num_blocks, device=sol.device, dtype=sol.dtype)
+    block_grad_sums = torch.zeros(num_blocks, device=device, dtype=dtype)
+    block_counts = torch.zeros(num_blocks, device=device, dtype=dtype)
 
     block_grad_sums.scatter_add_(0, global_block_ids, flat_grad_output)
     block_counts.scatter_add_(0, global_block_ids, torch.ones_like(flat_grad_output))
@@ -167,20 +134,22 @@ def isotonic_l2_backward(sol: Tensor, grad_output: Tensor) -> Tensor:
     # Broadcast the block average back to every element
     block_grad = block_grad_sums[global_block_ids]
     block_count = block_counts[global_block_ids]
-    grad_input = block_grad / block_count
+    grad_input = block_grad / torch.clamp(block_count, min=1.0)
 
     return grad_input.reshape(batch_size, p)
 
 
 def isotonic_kl_backward(s: Tensor, sol: Tensor, grad_output: Tensor) -> Tensor:
     batch_size, p = sol.shape
+    device = sol.device
+    dtype = sol.dtype
     num_blocks = batch_size * p
-    global_block_ids = _get_global_block_ids(sol, batch_size, p)
+    global_block_ids = _get_global_block_ids(sol)
 
     # Compute a numerically stable softmax within each pooled block
     flat_grad_output = grad_output.reshape(-1)
     flat_s = s.reshape(-1)
-    block_max = torch.full((num_blocks,), -float("inf"), device=s.device, dtype=s.dtype)
+    block_max = torch.full((num_blocks,), -float("inf"), device=device, dtype=dtype)
     block_max.scatter_reduce_(
         0,
         global_block_ids,
@@ -190,12 +159,12 @@ def isotonic_kl_backward(s: Tensor, sol: Tensor, grad_output: Tensor) -> Tensor:
     )
     flat_s_stable = flat_s - block_max[global_block_ids]
     flat_exp = torch.exp(flat_s_stable)
-    block_exp_sums = torch.zeros(num_blocks, device=s.device, dtype=s.dtype)
+    block_exp_sums = torch.zeros(num_blocks, device=device, dtype=dtype)
     block_exp_sums.scatter_add_(0, global_block_ids, flat_exp)
-    softmax_weights = flat_exp / block_exp_sums[global_block_ids]
+    softmax_weights = flat_exp / torch.clamp(block_exp_sums[global_block_ids], min=1e-6)
 
     # Sum upstream gradients for each pooled block.
-    block_grad_sums = torch.zeros(num_blocks, device=s.device, dtype=s.dtype)
+    block_grad_sums = torch.zeros(num_blocks, device=device, dtype=dtype)
     block_grad_sums.scatter_add_(0, global_block_ids, flat_grad_output)
 
     # Distribute the block gradient according to the block softmax.
