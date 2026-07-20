@@ -1,12 +1,12 @@
 [project]
 name = "torchpsort"
-version = "0.0.2"
+version = "0.0.3"
 description = "Fast, differentiable sorting in pure PyTorch without C++ or CUDA"
 readme = "README.md"
 authors = [
     {name = "RektPunk", email = "rektpunk@gmail.com"},
 ]
-requires-python = ">=3.12,<=3.14"
+requires-python = ">=3.12,<3.15"
 classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules"
 ]
