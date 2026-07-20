@@ -135,46 +135,70 @@ def isotonic_kl_forward(x: Tensor, w: Tensor) -> Tensor:
     return solution
 
 
-@torch.jit.script
+def _get_global_block_ids(sol: Tensor, batch_size: int, p: int) -> Tensor:
+    # Detect boundaries between pooled isotonic blocks
+    tol = 1e-6 if sol.dtype == torch.float32 else 1e-12
+    diff = torch.abs(sol[:, 1:] - sol[:, :-1]) >= tol
+    start_mask = torch.cat(
+        [torch.ones(batch_size, 1, dtype=torch.bool, device=sol.device), diff], dim=1
+    )
+
+    # Assign a unique block id to every element
+    local_block_ids = torch.cumsum(start_mask.to(torch.long), dim=1) - 1
+    global_block_ids = (
+        local_block_ids + p * torch.arange(batch_size, device=sol.device).unsqueeze(1)
+    ).reshape(-1)
+    return global_block_ids
+
+
 def isotonic_l2_backward(sol: Tensor, grad_output: Tensor) -> Tensor:
     batch_size, p = sol.shape
-    grad_input = torch.empty_like(grad_output)
-    tol = 1e-6 if sol.dtype == torch.float32 else 1e-12
-    for b in range(batch_size):
-        start = 0
-        while start < p:
-            end = start + 1
-            while end < p and torch.abs(sol[b, end] - sol[b, start]) < tol:
-                end += 1
+    num_blocks = batch_size * p
+    global_block_ids = _get_global_block_ids(sol, batch_size, p)
 
-            val = 1.0 / float(end - start)
+    # Sum gradients and count elements for each pooled block
+    flat_grad_output = grad_output.reshape(-1)
+    block_grad_sums = torch.zeros(num_blocks, device=sol.device, dtype=sol.dtype)
+    block_counts = torch.zeros(num_blocks, device=sol.device, dtype=sol.dtype)
 
-            grad_sum = grad_output[b, start:end].sum()
-            grad_input[b, start:end] = val * grad_sum
+    block_grad_sums.scatter_add_(0, global_block_ids, flat_grad_output)
+    block_counts.scatter_add_(0, global_block_ids, torch.ones_like(flat_grad_output))
 
-            start = end
+    # Broadcast the block average back to every element
+    block_grad = block_grad_sums[global_block_ids]
+    block_count = block_counts[global_block_ids]
+    grad_input = block_grad / block_count
 
-    return grad_input
+    return grad_input.reshape(batch_size, p)
 
 
-@torch.jit.script
 def isotonic_kl_backward(s: Tensor, sol: Tensor, grad_output: Tensor) -> Tensor:
     batch_size, p = sol.shape
-    grad_input = torch.empty_like(grad_output)
-    tol = 1e-6 if sol.dtype == torch.float32 else 1e-12
-    for b in range(batch_size):
-        start = 0
-        while start < p:
-            end = start + 1
-            while end < p and torch.abs(sol[b, end] - sol[b, start]) < tol:
-                end += 1
+    num_blocks = batch_size * p
+    global_block_ids = _get_global_block_ids(sol, batch_size, p)
 
-            block_s = s[b, start:end]
-            softmax_weights = torch.softmax(block_s, dim=0)
+    # Compute a numerically stable softmax within each pooled block
+    flat_grad_output = grad_output.reshape(-1)
+    flat_s = s.reshape(-1)
+    block_max = torch.full((num_blocks,), -float("inf"), device=s.device, dtype=s.dtype)
+    block_max.scatter_reduce_(
+        0,
+        global_block_ids,
+        flat_s,
+        reduce="amax",
+        include_self=False,
+    )
+    flat_s_stable = flat_s - block_max[global_block_ids]
+    flat_exp = torch.exp(flat_s_stable)
+    block_exp_sums = torch.zeros(num_blocks, device=s.device, dtype=s.dtype)
+    block_exp_sums.scatter_add_(0, global_block_ids, flat_exp)
+    softmax_weights = flat_exp / block_exp_sums[global_block_ids]
 
-            grad_sum = grad_output[b, start:end].sum()
-            grad_input[b, start:end] = softmax_weights * grad_sum
+    # Sum upstream gradients for each pooled block.
+    block_grad_sums = torch.zeros(num_blocks, device=s.device, dtype=s.dtype)
+    block_grad_sums.scatter_add_(0, global_block_ids, flat_grad_output)
 
-            start = end
+    # Distribute the block gradient according to the block softmax.
+    grad_input = softmax_weights * block_grad_sums[global_block_ids]
 
-    return grad_input
+    return grad_input.reshape(batch_size, p)
