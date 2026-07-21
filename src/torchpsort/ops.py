@@ -27,7 +27,6 @@ from .isotonic import (
 )
 
 
-@torch.jit.script
 def _index_range(x: Tensor) -> Tensor:
     return torch.arange(
         x.shape[1],
@@ -36,7 +35,6 @@ def _index_range(x: Tensor) -> Tensor:
     ).expand(x.shape[0], -1)
 
 
-@torch.jit.script
 def _descending_ranks(x: Tensor) -> Tensor:
     return torch.arange(
         x.shape[1],
@@ -47,7 +45,6 @@ def _descending_ranks(x: Tensor) -> Tensor:
     ).expand_as(x)
 
 
-@torch.jit.script
 def _inv_permutation(permutation: Tensor) -> Tensor:
     inv_permutation = torch.empty_like(permutation)
     inv_permutation.scatter_(1, permutation, _index_range(permutation))
