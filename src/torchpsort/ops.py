@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Literal
-
 import torch
 from torch import Tensor
 
@@ -51,7 +49,7 @@ def _inv_permutation(permutation: Tensor) -> Tensor:
     return inv_permutation
 
 
-def _validate_inputs(x: Tensor, reg: Literal["l2", "kl"], tau: float) -> None:
+def _validate_inputs(x: Tensor, reg: str, tau: float) -> None:
     if x.ndim != 2:
         raise ValueError("x must be a 2D tensor")
 
@@ -64,7 +62,7 @@ def _validate_inputs(x: Tensor, reg: Literal["l2", "kl"], tau: float) -> None:
 
 class SoftRank(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x: Tensor, reg: Literal["l2", "kl"] = "l2", tau: float = 1.0):
+    def forward(ctx, x: Tensor, reg: str = "l2", tau: float = 1.0):
         _validate_inputs(x, reg, tau)
 
         ctx.scale = 1.0 / tau
@@ -107,7 +105,7 @@ class SoftRank(torch.autograd.Function):
 
 class SoftSort(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x: Tensor, reg: Literal["l2", "kl"] = "l2", tau: float = 1.0):
+    def forward(ctx, x: Tensor, reg: str = "l2", tau: float = 1.0):
         _validate_inputs(x, reg, tau)
 
         ctx.is_l2 = reg == "l2"
@@ -135,7 +133,7 @@ class SoftSort(torch.autograd.Function):
         return grad.gather(1, inv_permutation), None, None
 
 
-def soft_rank(x: Tensor, reg: Literal["l2", "kl"] = "l2", tau: float = 1.0) -> Tensor:
+def soft_rank(x: Tensor, reg: str = "l2", tau: float = 1.0) -> Tensor:
     """Differentiable approximation of the rank operator.
 
     Args:
@@ -146,7 +144,7 @@ def soft_rank(x: Tensor, reg: Literal["l2", "kl"] = "l2", tau: float = 1.0) -> T
     return SoftRank.apply(x, reg, tau)
 
 
-def soft_sort(x: Tensor, reg: Literal["l2", "kl"] = "l2", tau: float = 1.0) -> Tensor:
+def soft_sort(x: Tensor, reg: str = "l2", tau: float = 1.0) -> Tensor:
     """Differentiable approximation of the sort operator.
 
     Args:
