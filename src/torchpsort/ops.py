@@ -168,4 +168,4 @@ def soft_quantile(x: Tensor, q: float, tau: float = 1.0, reg: str = "l2") -> Ten
 
 def soft_median(x: Tensor, tau: float = 1.0, reg: str = "l2") -> Tensor:
     """Differentiable approximation of the median operator."""
-    return soft_quantile(x, 0.5, tau=tau, reg=reg)
+    return soft_quantile(x, q=0.5, tau=tau, reg=reg)
