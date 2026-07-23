@@ -25,14 +25,6 @@ from .isotonic import (
 )
 
 
-def _index_range(x: Tensor) -> Tensor:
-    return torch.arange(
-        x.shape[1],
-        dtype=x.dtype,
-        device=x.device,
-    ).expand(x.shape[0], -1)
-
-
 def _descending_ranks(x: Tensor) -> Tensor:
     return torch.arange(
         x.shape[1],
@@ -43,13 +35,7 @@ def _descending_ranks(x: Tensor) -> Tensor:
     ).expand_as(x)
 
 
-def _inv_permutation(permutation: Tensor) -> Tensor:
-    inv_permutation = torch.empty_like(permutation)
-    inv_permutation.scatter_(1, permutation, _index_range(permutation))
-    return inv_permutation
-
-
-def _validate_inputs(x: Tensor, reg: str, tau: float) -> None:
+def _validate_inputs(x: Tensor, tau: float, reg: str) -> None:
     if x.ndim != 2:
         raise ValueError("x must be a 2D tensor")
 
@@ -62,15 +48,15 @@ def _validate_inputs(x: Tensor, reg: str, tau: float) -> None:
 
 class SoftRank(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x: Tensor, reg: str = "l2", tau: float = 1.0):
-        _validate_inputs(x, reg, tau)
+    def forward(ctx, x: Tensor, tau: float = 1.0, reg: str = "l2"):
+        _validate_inputs(x, tau, reg)
 
         ctx.scale = 1.0 / tau
         ctx.is_l2 = reg == "l2"
         w = _descending_ranks(x)
         theta = x * ctx.scale
         s, permutation = torch.sort(theta, descending=True)
-        inv_permutation = _inv_permutation(permutation)
+        inv_permutation = permutation.argsort(dim=1)
         if ctx.is_l2:
             dual_sol = isotonic_l2_forward(s - w)
             ret = (s - dual_sol).gather(1, inv_permutation)
@@ -105,13 +91,13 @@ class SoftRank(torch.autograd.Function):
 
 class SoftSort(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x: Tensor, reg: str = "l2", tau: float = 1.0):
-        _validate_inputs(x, reg, tau)
+    def forward(ctx, x: Tensor, tau: float = 1.0, reg: str = "l2"):
+        _validate_inputs(x, tau, reg)
 
         ctx.is_l2 = reg == "l2"
         w = _descending_ranks(x) / tau
         s, permutation = torch.sort(-x, descending=True)
-        inv_permutation = _inv_permutation(permutation)
+        inv_permutation = permutation.argsort(dim=1)
         if ctx.is_l2:
             sol = isotonic_l2_forward(w - s)
             ctx.save_for_backward(sol, inv_permutation)
@@ -133,23 +119,53 @@ class SoftSort(torch.autograd.Function):
         return grad.gather(1, inv_permutation), None, None
 
 
-def soft_rank(x: Tensor, reg: str = "l2", tau: float = 1.0) -> Tensor:
-    """Differentiable approximation of the rank operator.
-
-    Args:
-        x: Input tensor of shape (batch, p)
-        reg: Regularization type ("l2" or "kl")
-        tau: Regularization strength (temperature)
-    """
-    return SoftRank.apply(x, reg, tau)
+def soft_rank(x: Tensor, tau: float = 1.0, reg: str = "l2") -> Tensor:
+    """Differentiable approximation of the rank operator."""
+    return SoftRank.apply(x, tau, reg)
 
 
-def soft_sort(x: Tensor, reg: str = "l2", tau: float = 1.0) -> Tensor:
-    """Differentiable approximation of the sort operator.
+def soft_sort(x: Tensor, tau: float = 1.0, reg: str = "l2") -> Tensor:
+    """Differentiable approximation of the sort operator."""
+    return SoftSort.apply(x, tau, reg)
 
-    Args:
-        x: Input tensor of shape (batch, p)
-        reg: Regularization type ("l2" or "kl")
-        tau: Regularization strength (temperature)
-    """
-    return SoftSort.apply(x, reg, tau)
+
+def soft_min(x: Tensor, tau: float = 1.0, reg: str = "l2") -> Tensor:
+    """Differentiable approximation of the min operator."""
+    return soft_sort(x, tau=tau, reg=reg)[:, 0]
+
+
+def soft_max(x: Tensor, tau: float = 1.0, reg: str = "l2") -> Tensor:
+    """Differentiable approximation of the max operator."""
+    return soft_sort(x, tau=tau, reg=reg)[:, -1]
+
+
+def soft_kth_value(x: Tensor, k: int, tau: float = 1.0, reg: str = "l2") -> Tensor:
+    """Differentiable approximation of the k-th value operator."""
+    if not 1 <= k <= x.shape[1]:
+        raise ValueError(f"k must be in [1, {x.shape[1]}], got {k}")
+    return soft_sort(x, tau=tau, reg=reg)[:, k - 1]
+
+
+def soft_topk_values(x: Tensor, k: int, tau: float = 1.0, reg: str = "l2") -> Tensor:
+    """Differentiable approximation of the top-k values operator."""
+    if not 1 <= k <= x.shape[1]:
+        raise ValueError(f"k must be in [1, {x.shape[1]}], got {k}")
+    return soft_sort(x, tau=tau, reg=reg)[:, -k:]
+
+
+def soft_quantile(x: Tensor, q: float, tau: float = 1.0, reg: str = "l2") -> Tensor:
+    """Differentiable approximation of the quantile operator."""
+    if not 0 <= q <= 1:
+        raise ValueError("q must be in [0, 1]")
+    sorted_x = soft_sort(x, tau=tau, reg=reg)
+    n = sorted_x.shape[1]
+    pos = q * (n - 1)
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    alpha = pos - lo
+    return (1 - alpha) * sorted_x[:, lo] + alpha * sorted_x[:, hi]
+
+
+def soft_median(x: Tensor, tau: float = 1.0, reg: str = "l2") -> Tensor:
+    """Differentiable approximation of the median operator."""
+    return soft_quantile(x, q=0.5, tau=tau, reg=reg)

@@ -1,3 +1,21 @@
-from .ops import soft_rank, soft_sort
+from .ops import (
+    soft_kth_value,
+    soft_max,
+    soft_median,
+    soft_min,
+    soft_quantile,
+    soft_rank,
+    soft_sort,
+    soft_topk_values,
+)
 
-__all__ = ["soft_sort", "soft_rank"]
+__all__ = [
+    "soft_kth_value",
+    "soft_max",
+    "soft_median",
+    "soft_min",
+    "soft_quantile",
+    "soft_rank",
+    "soft_sort",
+    "soft_topk_values",
+]

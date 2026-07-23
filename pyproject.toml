@@ -1,6 +1,6 @@
 [project]
 name = "torchpsort"
-version = "0.1.2"
+version = "0.1.3"
 description = "Fast, differentiable sorting in pure PyTorch without C++ or CUDA"
 readme = "README.md"
 authors = [
