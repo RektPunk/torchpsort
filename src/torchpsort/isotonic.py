@@ -50,13 +50,13 @@ def isotonic_l2_forward(x: Tensor) -> Tensor:
         # Compute interval means ending at k.
         sum_jk = x_cumsum[:, k + 1 : k + 2] - x_cumsum[:, : k + 1]
         count_jk = counts[p - k - 1 :]
-        val_k = sum_jk / count_jk
+        interval_values = sum_jk / count_jk
 
-        # Prefix minimums: V_k[b, i] = min_{j <= i} val_k[b, j]
-        V_k = torch.cummin(val_k, dim=1)[0]
+        # Prefix minimums: V_k[b, i] = min_{j <= i} interval_values[b, j]
+        prefix_min = torch.cummin(interval_values, dim=1)[0]
 
-        # Suffix maximums: sol[b, i] = max_{k >= i} V_k[b, i]
-        sol[:, : k + 1] = torch.maximum(sol[:, : k + 1], V_k)
+        # Suffix maximums: sol[b, i] = max_{k >= i} prefix_min[b, i]
+        torch.maximum(sol[:, : k + 1], prefix_min, out=sol[:, : k + 1])
 
     return sol
 
@@ -78,13 +78,13 @@ def isotonic_kl_forward(x: Tensor, w: Tensor) -> Tensor:
             lse_w[:, :k] = torch.logaddexp(lse_w[:, :k], w_k)
 
         # Compute interval objective values: (batch_size, k + 1)
-        val_k = lse_x[:, : k + 1] - lse_w[:, : k + 1]
+        interval_values = lse_x[:, : k + 1] - lse_w[:, : k + 1]
 
-        # Prefix minimums: V_k[b, i] = min_{j <= i} val_k[b, j]
-        V_k = torch.cummin(val_k, dim=1)[0]
+        # Prefix minimums: prefix_min[b, i] = min_{j <= i} interval_values[b, j]
+        prefix_min = torch.cummin(interval_values, dim=1)[0]
 
-        # Suffix maximums: sol[b, i] = max_{k >= i} V_k[b, i]
-        sol[:, : k + 1] = torch.maximum(sol[:, : k + 1], V_k)
+        # Suffix maximums: sol[b, i] = max_{k >= i} prefix_min[b, i]
+        torch.maximum(sol[:, : k + 1], prefix_min, out=sol[:, : k + 1])
 
     return sol
 
