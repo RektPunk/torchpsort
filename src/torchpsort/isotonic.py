@@ -31,6 +31,7 @@
 #  DAMAGE.
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 
@@ -38,57 +39,54 @@ def isotonic_l2_forward(x: Tensor) -> Tensor:
     _, p = x.shape
     device = x.device
     dtype = x.dtype
+    sol = torch.full_like(x, -float("inf"))
 
-    # Compute interval sums and means for all pairs (j <= k)
-    x_cumsum = torch.cumsum(x, dim=1)
-    sum_jk = x_cumsum[:, None, :] - x_cumsum[:, :, None] + x[:, :, None]
-    count_jk = torch.arange(1, p + 1, device=device, dtype=dtype)
-    count_jk = count_jk[None, :] - count_jk[:, None] + 1.0
-    vals = sum_jk / count_jk[None, :, :]
+    # Compute prefix sums for interval sum queries.
+    x_cumsum = F.pad(torch.cumsum(x, dim=1), (1, 0))
 
-    # Mask invalid lower-triangle entries (j > k)
-    mask = torch.triu(torch.ones(p, p, device=device, dtype=torch.bool))[None, :, :]
+    # Interval lengths for a fixed right endpoint k.
+    counts = torch.arange(p, 0, -1, device=device, dtype=dtype)
+    for k in range(p):
+        # Compute interval means ending at k.
+        sum_jk = x_cumsum[:, k + 1 : k + 2] - x_cumsum[:, : k + 1]
+        count_jk = counts[p - k - 1 :]
+        val_k = sum_jk / count_jk
 
-    # Interval means: (batch_size, p, p)
-    vals = torch.where(mask, vals, -float("inf"))
+        # Prefix minimums: V_k[b, i] = min_{j <= i} val_k[b, j]
+        V_k = torch.cummin(val_k, dim=1)[0]
 
-    # Suffix maximums: U[b, j, i] = max_{k >= i} vals[b, j, k]
-    U = torch.flip(torch.cummax(torch.flip(vals, dims=[2]), dim=2)[0], dims=[2])
-    U = torch.where(mask, U, float("inf"))
+        # Suffix maximums: sol[b, i] = max_{k >= i} V_k[b, i]
+        sol[:, : k + 1] = torch.maximum(sol[:, : k + 1], V_k)
 
-    # Prefix minimums: sol[b, i] = min_{j <= i} U[b, j, i]
-    return torch.min(U, dim=1)[0]
+    return sol
 
 
 def isotonic_kl_forward(x: Tensor, w: Tensor) -> Tensor:
     _, p = x.shape
-    device = x.device
-    mask = torch.triu(torch.ones(p, p, device=device, dtype=torch.bool))[None, :, :]
-    eps = torch.finfo(x.dtype).tiny
+    sol = torch.full_like(x, -float("inf"))
 
-    # Log-sum-exp for x across all intervals (j <= k)
-    diff_x = x[:, None, :] - x[:, :, None]
-    diff_x = torch.where(mask, diff_x, -float("inf"))
-    exp_x = torch.exp(diff_x)
-    sum_exp_x = torch.cumsum(exp_x, dim=2)
-    lse_x = x[:, :, None] + torch.log(torch.clamp(sum_exp_x, min=eps))
+    # Running log-sum-exp values for intervals ending at current k.
+    lse_x = x.clone()
+    lse_w = w.clone()
+    for k in range(p):
+        if k > 0:
+            # Update log-sum-exp values for intervals ending at k.
+            x_k = x[:, k : k + 1]
+            w_k = w[:, k : k + 1]
 
-    # Log-sum-exp for w across all intervals (j <= k)
-    diff_w = w[:, None, :] - w[:, :, None]
-    diff_w = torch.where(mask, diff_w, -float("inf"))
-    exp_w = torch.exp(diff_w)
-    sum_exp_w = torch.cumsum(exp_w, dim=2)
-    lse_w = w[:, :, None] + torch.log(torch.clamp(sum_exp_w, min=eps))
+            lse_x[:, :k] = torch.logaddexp(lse_x[:, :k], x_k)
+            lse_w[:, :k] = torch.logaddexp(lse_w[:, :k], w_k)
 
-    # Compute interval objective values: (batch_size, p, p)
-    vals = torch.where(mask, lse_x - lse_w, -float("inf"))
+        # Compute interval objective values: (batch_size, k + 1)
+        val_k = lse_x[:, : k + 1] - lse_w[:, : k + 1]
 
-    # Suffix maximums: U[b, j, i] = max_{k >= i} vals[b, j, k]
-    U = torch.flip(torch.cummax(torch.flip(vals, dims=[2]), dim=2)[0], dims=[2])
-    U = torch.where(mask, U, float("inf"))
+        # Prefix minimums: V_k[b, i] = min_{j <= i} val_k[b, j]
+        V_k = torch.cummin(val_k, dim=1)[0]
 
-    # Prefix minimums: sol[b, i] = min_{j <= i} U[b, j, i]
-    return torch.min(U, dim=1)[0]
+        # Suffix maximums: sol[b, i] = max_{k >= i} V_k[b, i]
+        sol[:, : k + 1] = torch.maximum(sol[:, : k + 1], V_k)
+
+    return sol
 
 
 def _get_global_block_ids(sol: Tensor) -> Tensor:

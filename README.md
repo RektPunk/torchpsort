@@ -11,14 +11,5 @@ Fast, differentiable sorting and ranking in **pure PyTorch without C++ or CUDA**
 pip install torchpsort
 ```
 
-> [!TIP]
-> If available, `torch.compile` can further improve performance:
->
-> ```python
-> import torch
-> import torchpsort
->
-> soft_sort = torch.compile(torchpsort.soft_sort)
-> soft_rank = torch.compile(torchpsort.soft_rank)
-> ```
-> `torch.compile` is optional and provided by PyTorch. Depending on your platform and backend, it may require a supported compiler.
+> [!CAUTION]
+> **Do not use `torch.compile`** with these functions. Because the implementation uses a sequential Python loop over the sequence length ($p$) to guarantee $O(Bp)$ memory efficiency, `torch.compile` will cause a graph compilation explosion for large sequences.
