@@ -31,10 +31,13 @@
 #  DAMAGE.
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
+_SAFETY_FACTOR = 0.25
 
-def isotonic_l2_forward(x: Tensor) -> Tensor:
+
+def _isotonic_l2_forward_dense(x: Tensor) -> Tensor:
     _, p = x.shape
     device = x.device
     dtype = x.dtype
@@ -60,7 +63,33 @@ def isotonic_l2_forward(x: Tensor) -> Tensor:
     return torch.min(U, dim=1)[0]
 
 
-def isotonic_kl_forward(x: Tensor, w: Tensor) -> Tensor:
+def _isotonic_l2_forward_streaming(x: Tensor) -> Tensor:
+    _, p = x.shape
+    device = x.device
+    dtype = x.dtype
+    sol = torch.full_like(x, -float("inf"))
+
+    # Compute prefix sums for interval sum queries.
+    x_cumsum = F.pad(torch.cumsum(x, dim=1), (1, 0))
+
+    # Interval lengths for a fixed right endpoint k.
+    counts = torch.arange(p, 0, -1, device=device, dtype=dtype)
+    for k in range(p):
+        # Compute interval means ending at k.
+        sum_jk = x_cumsum[:, k + 1 : k + 2] - x_cumsum[:, : k + 1]
+        count_jk = counts[p - k - 1 :]
+        interval_values = sum_jk / count_jk
+
+        # Prefix minimums: V_k[b, i] = min_{j <= i} interval_values[b, j]
+        prefix_min = torch.cummin(interval_values, dim=1)[0]
+
+        # Suffix maximums: sol[b, i] = max_{k >= i} prefix_min[b, i]
+        torch.maximum(sol[:, : k + 1], prefix_min, out=sol[:, : k + 1])
+
+    return sol
+
+
+def _isotonic_kl_forward_dense(x: Tensor, w: Tensor) -> Tensor:
     _, p = x.shape
     device = x.device
     mask = torch.triu(torch.ones(p, p, device=device, dtype=torch.bool))[None, :, :]
@@ -89,6 +118,65 @@ def isotonic_kl_forward(x: Tensor, w: Tensor) -> Tensor:
 
     # Prefix minimums: sol[b, i] = min_{j <= i} U[b, j, i]
     return torch.min(U, dim=1)[0]
+
+
+def _isotonic_kl_forward_streaming(x: Tensor, w: Tensor) -> Tensor:
+    _, p = x.shape
+    sol = torch.full_like(x, -float("inf"))
+
+    # Running log-sum-exp values for intervals ending at current k.
+    lse_x = x.clone()
+    lse_w = w.clone()
+    for k in range(p):
+        if k > 0:
+            # Update log-sum-exp values for intervals ending at k.
+            x_k = x[:, k : k + 1]
+            w_k = w[:, k : k + 1]
+
+            lse_x[:, :k] = torch.logaddexp(lse_x[:, :k], x_k)
+            lse_w[:, :k] = torch.logaddexp(lse_w[:, :k], w_k)
+
+        # Compute interval objective values: (batch_size, k + 1)
+        interval_values = lse_x[:, : k + 1] - lse_w[:, : k + 1]
+
+        # Prefix minimums: prefix_min[b, i] = min_{j <= i} interval_values[b, j]
+        prefix_min = torch.cummin(interval_values, dim=1)[0]
+
+        # Suffix maximums: sol[b, i] = max_{k >= i} prefix_min[b, i]
+        torch.maximum(sol[:, : k + 1], prefix_min, out=sol[:, : k + 1])
+
+    return sol
+
+
+def _estimated_bytes(x: Tensor) -> int:
+    batch_size, p = x.shape
+    return 5 * batch_size * p * p * x.element_size()
+
+
+def isotonic_l2_forward(x: Tensor) -> Tensor:
+    if x.device.type != "cuda":
+        return _isotonic_l2_forward_streaming(x)
+
+    # Approximate peak memory of the dense implementation.
+    estimated_bytes = _estimated_bytes(x)
+    free_bytes, _ = torch.cuda.mem_get_info(x.device)
+
+    if estimated_bytes <= free_bytes * _SAFETY_FACTOR:
+        return _isotonic_l2_forward_dense(x)
+    return _isotonic_l2_forward_streaming(x)
+
+
+def isotonic_kl_forward(x: Tensor, w: Tensor) -> Tensor:
+    if x.device.type != "cuda":
+        return _isotonic_kl_forward_streaming(x, w)
+
+    # Approximate peak memory of the dense implementation.
+    estimated_bytes = _estimated_bytes(x)
+    free_bytes, _ = torch.cuda.mem_get_info(x.device)
+
+    if estimated_bytes <= free_bytes * _SAFETY_FACTOR:
+        return _isotonic_kl_forward_dense(x, w)
+    return _isotonic_kl_forward_streaming(x, w)
 
 
 def _get_global_block_ids(sol: Tensor) -> Tensor:
