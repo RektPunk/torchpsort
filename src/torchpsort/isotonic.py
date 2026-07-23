@@ -42,22 +42,28 @@ def _isotonic_l2_forward_dense(x: Tensor) -> Tensor:
     device = x.device
     dtype = x.dtype
 
-    # Compute interval sums and means for all pairs (j <= k)
-    x_cumsum = torch.cumsum(x, dim=1)
-    sum_jk = x_cumsum[:, None, :] - x_cumsum[:, :, None] + x[:, :, None]
-    count_jk = torch.arange(1, p + 1, device=device, dtype=dtype)
-    count_jk = count_jk[None, :] - count_jk[:, None] + 1.0
-    vals = sum_jk / count_jk[None, :, :]
+    # Compute interval sums for all pairs (j <= k)
+    pad_cumsum = F.pad(torch.cumsum(x, dim=1), (1, 0))  # (batch_size, p + 1)
 
-    # Mask invalid lower-triangle entries (j > k)
-    mask = torch.triu(torch.ones(p, p, device=device, dtype=torch.bool))[None, :, :]
+    # sum_jk[b, j, k] = sum(x[b, j : k+1])
+    sum_jk = pad_cumsum[:, None, 1:] - pad_cumsum[:, :-1, None]
 
-    # Interval means: (batch_size, p, p)
-    vals = torch.where(mask, vals, -float("inf"))
+    # Compute the length of each interval [j, k].
+    idx = torch.arange(p, device=device, dtype=dtype)
+
+    # count_jk[j, k] = k - j + 1
+    count_jk = idx[None, :] - idx[:, None] + 1.0
+
+    # vals[b, j, k] = mean of interval [j, k]
+    vals = sum_jk / count_jk
+
+    # Mask out mathematically invalid intervals (where start j > end k).
+    mask = torch.ones(p, p, device=device, dtype=torch.bool).triu_()
+    vals.masked_fill_(~mask, -float("inf"))
 
     # Suffix maximums: U[b, j, i] = max_{k >= i} vals[b, j, k]
     U = torch.flip(torch.cummax(torch.flip(vals, dims=[2]), dim=2)[0], dims=[2])
-    U = torch.where(mask, U, float("inf"))
+    U.masked_fill_(~mask, float("inf"))
 
     # Prefix minimums: sol[b, i] = min_{j <= i} U[b, j, i]
     return torch.min(U, dim=1)[0]
